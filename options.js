@@ -1,315 +1,323 @@
+'use strict';
+
 var fs = require('fs');
-require('colors');
+var util = require('util');
+
+var async = require('async');
+var JSON = require('json-bigint');
+
+var args = require('./args.js');
+var log = require('./log.js');
+var drivers = require('./drivers.js');
 
 /**
- * Holds the nomnom object with all the options and settings.
+ * This object defines an option that can be passed into the script.
+ * @typedef {Object} OptionDef
+ * @property {string} abbr          The abbreviation with which we can call this options
+ * @property {*} [preset]           The value for this options if it has not been set
+ * @property {string} help          An explanatory description about what this option controls
+ * @property {boolean} [list=false] Whether this option can be set multiple times
+ * @property {boolean} [flag=false] Whether this option needs any values passed in
+ * @property {number} [min]         An upper limit for numeric option values that will be accepted
+ * @property {number} [max]         A lower limit for numeric option values that will be accepted
+ * @property {*} [value]            Used internally to store the value that we parsed
+ * @property {boolean} [required]   Specifies that the script can't execute unless this options has been set. Settings this
+ *                                  option only makes sense if there's no preset
  */
-exports.nomnom = null;
 
 /**
- * Stores information about which variable has been set from the command line.
- */
-exports.overrides = {};
-
-/**
- * Sets up nomnom with all available command line options and returns the parsed options object.
  *
- * @returns {Object}
+ * @type {Object.<string, OptionDef|Object.<string, OptionDef>> } OptionDefs
+ * @property {Object.<string, OptionDef>} drivers   Driver options such as specifying the source and target driver to use
+ * @property {Object.<string, OptionDef>} run       Options specifying performance values
+ * @property {Object.<string, OptionDef>} xform     Options for specifying transform functions
+ * @property {Object.<string, OptionDef>} memory    Options for memory limits
+ * @property {Object.<string, OptionDef>} errors    Options for error handling
+ * @property {Object.<string, OptionDef>} log       Options for reporting information
+ * @property {OptionDef} optionsfile                Allows to specify a file to use in addition to command line options
+ * @property {OptionDef} mapping                    Allows to overwrite the mapping received from the source driver
+ * @property {OptionDef} help                       Will print the help of the exporter instead of processing anything
+ * @property {Object.<string, OptionDef>} source    Options set by the source driver through {@link Driver#getInfo}
+ * @property {Object.<string, OptionDef>} target    Options set by the target driver through {@link Driver#getInfo}
  */
-exports.initialize = function() {
-    console.log("Elasticsearch Exporter - Version " + require('./package.json').version);
-    var options = {
-        sourceHost: {
-            abbr: 'a',
-            'default': 'localhost',
-            metavar: '<hostname>',
-            help: 'The host from which data is to be exported from'
-        },
-        targetHost: {
-            abbr: 'b',
-            metavar: '<hostname>',
-            help: 'The host to which to import the data to. Needs to be a different host than the source host, if no index is given'
-        },
-        sourcePort: {
-            abbr: 'p',
-            'default': 9200,
-            metavar: '<port>',
-            help: 'The port of the source host to talk to'
-        },
-        targetPort: {
-            abbr: 'q',
-            metavar: '<port>',
-            help: 'The port of the target host to talk to'
-        },
-        sourceIndex: {
-            abbr: 'i',
-            metavar: '<index>',
-            help: 'The index name from which to export data from. If no index is given, the entire database is exported'
-        },
-        targetIndex : {
-            abbr : 'j',
-            metavar : '<index>',
-            help : 'The index name to which to import the data to. Will only be used and is required if a source index has been specified'
-        },
-        sourceType : {
-            abbr : 't',
-            metavar : '<type>',
-            help : 'The type from which to export data from. If no type is given, the entire index is exported'
-        },
-        targetType: {
-            abbr: 'u',
-            metavar: '<type>',
-            help: 'The type name to which to import the data to. Will only be used and is required if were importing to the same'
-        },
-        sourceQuery: {
+var OPTIONS = {
+    drivers: {
+        source: {
             abbr: 's',
-            metavar: '<query>',
-            help: 'Define a query that limits what kind of documents are exporter from the source',
-            'default': {
-                match_all:{}
-            }
-        },
-        sourceSize: {
-            abbr: 'z',
-            metavar: '<size>',
-            help: 'The maximum number of results to be returned per query.',
-            'default': 10
-        },
-        sourceFile: {
-            abbr: 'f',
-            metavar: '<filebase>',
-            help: 'The filename from which the data should be imported. The format depends on the compression flag (default = compressed)'
-        },
-        targetFile: {
-            abbr: 'g',
-            metavar: '<filebase>',
-            help: 'The filename to which the data should be exported. The format depends on the compression flag (default = compressed)'
-        },
-        testRun: {
-            abbr: 'r',
-            metavar: 'true|false',
-            help: 'Make a connection with the database, but don\'t actually export anything',
-            'default': false,
-            choices: [ true, false ]
-        },
-        memoryLimit: {
-            abbr: 'm',
-            metavar: '<fraction>',
-            help: 'Set how much of the available memory the process should use for caching data to be written to the target driver. Should be a float value between 0 and 1 (make sure to pass --nouse-idle-notification --expose-gc as node options to make this work)',
-            'default' : 0.9
-        },
-        targetCompression: {
+            preset: 'elasticsearch',
+            help: 'The id of the driver to use to export data from'
+        }, target: {
+            abbr: 't',
+            preset: 'elasticsearch',
+            help: 'The id of the driver to use to import data into'
+        }, dir: {
             abbr: 'd',
-            metavar: 'true|false',
-            help: 'Set if compression should be used to write the data files',
-            'default': true,
-            choices: [ true, false ]
-        },
-        errorsAllowed: {
-            abbr: 'e',
-            metavar: '<count>',
-            help: 'If a connection error occurs this will set how often the script will retry to connect. This is for both reading and writing data.',
-            'default': 3
-        },
-        logEnabled: {
+            preset: ['./drivers'],
+            list: true,
+            help: 'Additional directories that the script should look for drivers in (can be used multiple times)'
+        }, list: {
             abbr: 'l',
-            metavar: 'true|false',
-            help: 'Set logging to console to be enable or disabled. Errors will still be printed, no matter what.',
-            'default': true,
-            choices: [ true, false ]
+            flag: true,
+            help: 'List all the drivers the script has found'
+        }, longlist: {
+            abbr: 'll',
+            flag: true,
+            help: 'List all the drivers the script has found with extended information abtout the drivers including version numbers'
+        }
+    }, run: {
+        test: {
+            abbr: 'rt',
+            help: 'Run only the source driver, not storing anything at the target driver',
+            flag: true
         },
-        sourceAuth: {
-            abbr: 'A',
-            metavar: '<username:password>',
-            help: 'Set authentication parameters for reaching the source Elasticsearch cluster'
+        step: {
+            abbr: 'rs',
+            help: 'How many documents should be fetched with each request (= step size)',
+            preset: 100,
+            min: 1
         },
-        targetAuth: {
-            abbr: 'B',
-            metavar: '<username:password>',
-            help: 'Set authentication parameters for reaching the target Elasticsearch cluster'
-        },
-        optionsFile: {
-            abbr: 'o',
-            metavar: '<file.json>',
-            help: 'Read options from a given file. Options from command line will override these values'
+        concurrency: {
+            abbr: 'rc',
+            help: 'How many processes should be spawned to do work in parallel (only used if both drivers support concurrent read/write)',
+            preset: 4,
+            min: 1
         },
         mapping: {
-            abbr: 'M',
-            metavar: '<mapping/setting>',
-            help: 'Override the settings/mappings of the source with the given settings/mappings string (needs to be proper format for ElasticSearch)'
+            abbr: 'rm',
+            flag: true,
+            help: 'Flag to enable copying mapping. If set to false all mapping operations are skipped.',
+            preset: true
         },
-        skipData: {
-            abbr: 'N',
-            metaVar: 'true|false',
-            help: 'Do not copy data, just the mappings',
-            'default': false,
-            choices: [ true, false ]
-        },
-        overwrite: {
-            abbr:'x',
-            metavar: 'true|false',
-            help: 'Allows to preserve already imported docs in the target database, so that changes are not overwritten',
-            'default': true,
-            choices: [ true, false ]
-        },
-        count: {
-            abbr: 'c',
-            metavar: 'true|false',
-            help: 'Keep track of individual documents fetched from the source driver. Warning: might take up lots of memory',
-            'default': false,
-            choices: [ true, false ]
-        },
-        maxSockets: {
-            abbr: 'S',
-            metavar: '<number>',
-            help: 'Sets the maximum number of concurrent sockets for the global http agent',
-            'default': 30
-        },
-        sourceHttpProxy: {
-            abbr: 'P',
-            metavar: '<host>',
-            help: 'Set an http proxy to use for all source requests.'
-        },
-        targetHttpProxy: {
-            abbr: 'Q',
-            metavar: '<host>',
-            help: 'Set an http proxy to use for all target requests.'
-        },
-        sourceUseSSL: {
-            abbr: 'U',
-            metavar: 'true|false',
-            help: 'Will attempt to connect to the source driver using https',
-            'default': false,
-            choices: [ true, false ]
-        },
-        targetUseSSL: {
-            abbr: 'V',
-            metavar: 'true|false',
-            help: 'Will attempt to connect to the target driver using https',
-            'default': false,
-            choices: [ true, false ]
-        },
-        insecure: {
-            abbr: 'T',
-            metavar: 'true|false',
-            help: 'Allow connections to SSL site without certs or with incorrect certs.',
-            'default': false,
-            choices: [ true, false ]
+        data: {
+            abbr: 'rd',
+            flag: true,
+            help: 'Flag to enable copying data. If set to false all data copy operations are skipped.',
+            preset: true
         }
-    };
-    function detectArgs(value) {
-        exports.overrides[this.name] = value;
+    }, xform: {
+        file: {
+            abbr: 'xf',
+            help: 'Filename for transform function which gets an object and returns the transformed object'
+        }
+        // TODO Control smarter error handling of transforms
+    }, "memory.limit": {
+        abbr: 'ml',
+        help: 'Set how much of the available memory the process should use for caching data to be written to the target driver. Should be a float value between 0 and 1 (make sure to pass --nouse-idle-notification --expose-gc as node OPTIONS to make this work)',
+        preset: 0.9,
+        min: 0,
+        max: 1
+    }, errors: {
+        retry: {
+            abbr: 'er',
+            help: 'If a connection error occurs this will set how many time the script will try to connect. This is for both reading and writing data',
+            preset: 3,
+            min: 1
+        }, ignore: {
+            abbr: 'ei',
+            help: 'Allows the script to continue if the script has reached the retry limit by simply skipping this request.',
+            flag: true
+        }
+    }, log: {
+        debug: {
+            abbr: 'v',
+            help: 'Enable debug messages to be printed out to console',
+            flag: true
+        }, enabled: {
+            abbr: 'le',
+            help: 'Set logging to console to be enable or disabled. Errors will still be printed, no matter what.',
+            preset: true,
+            flag: true
+        }, timestamps: {
+            abbr: 'lt',
+            help: 'Print timestamps before each log message',
+            flag: true
+        }
+    }, optionsfile: {
+        abbr: 'o',
+        help: 'Read OPTIONS from a given file. Options from command line will override these values'
+    }, mapping: {
+        abbr: 'm',
+        help: 'Override the settings/mappings of the source with the given settings/mappings string (needs to be proper format for ElasticSearch)'
+    }, help: {
+        abbr: 'h',
+        help: 'Print these options. Use with a driver to get driver specific options.',
+        flag: true
+    }, "network.sockets": {
+        abbr: 'ns',
+        help: 'Sets the maximum number of concurrent sockets for the global http agent',
+        preset: 30,
+        min: 1,
+        max: 65535
     }
-    for (var key in options) {
-        options[key].callback = detectArgs;
-    }
-    exports.nomnom = require('nomnom').script('exporter').options(options);
-    return exports.nomnom.parse();
 };
 
 /**
- * If a source file has been set then this will check if the file has been compressed by checking the file header.
- * This check is circumvented if the sourceCompression flag has been set (which forces to read un-/compressed).
+ * Flattens the options structure so that complex objects like { prop1: { opt1: val1 }} are converted to { prop1.opt1: val1 }.
+ * This format makes it easier to find matching options in a tree by using a simple map look up.
+ * The method also modifies the abbreviated form of the option by pre-pending the first character of the parent property.
  *
- * @param opts
+ * @param options   the option tree to convert
+ * @param type      the parent property of the tree to flatten, others are ignored
+ * @returns {{}}
  */
-exports.detectCompression = function(opts) {
-    if (!opts.sourceFile) return;
-    var header = new Buffer(2);
-    fs.readSync(fs.openSync(opts.sourceFile + '.data', 'r'), header, 0, 2);
-    opts.sourceCompression = (header[0] == 0x1f && header[1] == 0x8b);
+exports.deflate = (options, type) => {
+    let driverOptions = {};
+    let abbrPrefix = type.charAt(0);
+    for (let option in options[type]) {
+        driverOptions[type + "." + option] = options[type][option];
+        driverOptions[type + "." + option].abbr = abbrPrefix + driverOptions[type + "." + option].abbr;
+    }
+    return driverOptions;
 };
 
 /**
- * A lot of settings that are needed later can be set automatically to make the life of the user easier.
- * This function performs this task.
- * @param opts
- */
-exports.autoFillOptions = function(opts) {
-    if (!opts.targetHost && !opts.targetFile) {
-        opts.targetHost = opts.sourceHost;
-    }
-    if (!opts.targetPort && !opts.targetFile) {
-        opts.targetPort = opts.sourcePort;
-    }
-    if (opts.sourceIndex && !opts.targetIndex) {
-        opts.targetIndex = opts.sourceIndex;
-    }
-    if (opts.sourceType && !opts.targetType) {
-        opts.targetType = opts.sourceType;
-    }
-    if ((process.env.HTTP_PROXY || process.env.http_proxy) && !opts.httpProxy) {
-        if(process.env.HTTP_PROXY) {
-            opts.httpProxy = process.env.HTTP_PROXY;
-        } else if(process.env.http_proxy) {
-            opts.httpProxy = process.env.http_proxy ;
-        }
-    }
-};
-
-/**
- * This function will attempt to filter out any combinations of options that are not valid.
+ * Expands a flat options structure into an options tree so that { prop1.opt1: val1 } is converted to { prop1: { opt1: val1 }}.
+ * The abbreviated forms are left untouched in this process.
  *
- * @param opts
- * @returns {String} An error message if any or null
- */
-exports.validateOptions = function(opts) {
-    if (opts.sourceFile) {
-        if (!fs.existsSync(opts.sourceFile + '.meta')) {
-            return 'Source File "' + opts.sourceFile + '.meta" doesn\'t exist.';
-        }
-        if (!fs.existsSync(opts.sourceFile + '.data')) {
-            return 'Source File "' + opts.sourceFile + '.data" doesn\'t exist.';
-        }
-    }
-	if (opts.sourceHost != opts.targetHost) return;
-	if (opts.sourcePort != opts.targetPort) return;
-	if (opts.sourceIndex != opts.targetIndex) return;
-	if (opts.sourceType != opts.targetType && opts.sourceIndex) return;
-    if (opts.sourceFile && opts.targetHost) return;
-    if (opts.sourceHost && opts.targetFile) return;
-    return 'Not enough information has been given to be able to perform an export. Please review the options and examples again.';
-};
-
-/**
- * This function will read options from the optionsFile if set them if they haven't been set before.
- *
- * @param opts
- * @returns {string} An error message if any or null
- */
-exports.readOptionsFile = function(opts) {
-    if (!opts.optionsFile){
-        return;
-    }
-    if (!fs.existsSync(opts.optionsFile)) {
-        return 'The given options file could not be found.';
-    }
-    var fileOpts = JSON.parse(fs.readFileSync(opts.optionsFile));
-    for (var prop in fileOpts) {
-        if (!exports.overrides[prop]) {
-            opts[prop] = fileOpts[prop];
-        }
-    }
-};
-
-/**
- * This function will run the initialization and all validity checks available before returning the resulting options object.
+ * @param {Object} options   the option map to convert
  * @returns {Object}
  */
-exports.opts = function() {
-    function checkError(error) {
-        if (error) {
-            if (opts.logEnabled) {
-                console.log(error.red);
-                console.log(exports.nomnom.getUsage());
+exports.inflate = options => {
+    let expandedOpts = {};
+    for (let prop in options) {
+        let separator = prop.indexOf(".");
+        if (separator > -1) {
+            let group = prop.substr(0, separator);
+            let value = prop.substr(separator + 1);
+            if (!expandedOpts[group]) {
+                expandedOpts[group] = {};
             }
-            process.exit(1);
+            expandedOpts[group][value] = options[prop];
+        } else {
+            expandedOpts[prop] = options[prop];
         }
     }
-    var opts = exports.initialize();
-    checkError(exports.readOptionsFile(opts));
-    exports.detectCompression(opts);
-    exports.autoFillOptions(opts);
-    checkError(exports.validateOptions(opts));
-    return opts;
+    return expandedOpts;
+};
+
+/**
+ * Flattens an options tree the way it is stored in the options file (which is the way it's used for the rest of the process).
+ *
+ * @param {Object} options   the options tree to flatten
+ * @param {string} prefix    used for recursive operation, set as empty ''
+ * @returns {Object}
+ */
+exports.deflateFile = (options, prefix) => {
+    let driverOptions = {};
+    for (let key in options) {
+        let option = options[key];
+        let newKey = prefix ? prefix + "." + key : key;
+        if (typeof option == 'object') {
+            driverOptions = util._extend(driverOptions, exports.deflateFile(option, newKey));
+        } else {
+            driverOptions[newKey] = option;
+        }
+    }
+    return driverOptions;
+};
+
+/**
+ * Read the contents of the options file and set appropriate values in the existing options structure.
+ * Note that this is called after script options have been parsed, but before source and target options are
+ * parsed.
+ *
+ * @param {Object} scriptOptions
+ * @param {Object} sourceOptions
+ * @param {Object} targetOptions
+ */
+exports.readFile = (scriptOptions, sourceOptions, targetOptions) => {
+    if (!fs.existsSync(scriptOptions.optionsfile.value)) {
+        log.error('The given option file could not be found!');
+        log.die(3);
+    }
+    let fileContent = String(fs.readFileSync(scriptOptions.optionsfile.value));
+    let fileOpts = exports.deflateFile(JSON.parse(fileContent));
+    for (let prop in scriptOptions) {
+        if (!scriptOptions[prop].value && fileOpts[prop]) {
+            scriptOptions[prop].value = fileOpts[prop];
+        }
+    }
+    for (let prop in sourceOptions) {
+        if (fileOpts[prop]) {
+            sourceOptions[prop].preset = fileOpts[prop];
+            sourceOptions[prop].required = false;
+        }
+    }
+    for (let prop in targetOptions) {
+        if (fileOpts[prop]) {
+            targetOptions[prop].preset = fileOpts[prop];
+            targetOptions[prop].required = false;
+        }
+    }
+};
+
+/**
+ * The main entry point to read options from either command line or the options file.
+ *
+ * @param {ReadOptionsCb} callback
+ */
+exports.read = callback => {
+    let scriptOptions = args.parse(OPTIONS);
+
+    log.enabled.debug = scriptOptions['log.debug'];
+    log.enabled.info = scriptOptions['log.enabled'];
+    log.enabled.timestamps = scriptOptions['log.timestamps'];
+
+    args.printVersion();
+    log.debug('Reading options');
+
+    async.each(scriptOptions["drivers.dir"], (dir, callback) => drivers.find(dir, callback), () => {
+        if (scriptOptions['drivers.list']) {
+            drivers.describe(false);
+            process.exit(0);
+        }
+        if (scriptOptions['drivers.longlist']) {
+            drivers.describe(true);
+            process.exit(0);
+        }
+
+        let sourceOptions = exports.deflate(drivers.get(scriptOptions['drivers.source']).options, 'source');
+        let targetOptions = exports.deflate(drivers.get(scriptOptions['drivers.target']).options, 'target');
+
+        if (scriptOptions.optionsfile) {
+            exports.readFile(scriptOptions, sourceOptions, targetOptions);
+        }
+
+        let driverOptions = {};
+        for (let prop in OPTIONS) {
+            driverOptions[prop] = OPTIONS[prop];
+        }
+        for (let prop in sourceOptions) {
+            driverOptions[prop] = sourceOptions[prop];
+        }
+        for (let prop in targetOptions) {
+            driverOptions[prop] = targetOptions[prop];
+        }
+        let parsedDriverOptions = args.parse(driverOptions, true);
+        let options = exports.inflate(parsedDriverOptions);
+        callback(options);
+    });
+};
+/**
+ * @callback ReadOptionsCb
+ * @property {Object} options
+ */
+
+/**
+ * A helper method that will pass the parsed options to the selected drivers for verification.
+ *
+ * @param {Object} options
+ * @param {errorCb} callback
+ */
+exports.verify = (options, callback) => {
+    if (options.drivers.source == options.drivers.target) {
+        let driver = drivers.get(options.drivers.source);
+        log.debug('%s is verifying options', driver.info.name);
+        return driver.driver.verifyOptions(options, callback);
+    }
+    async.map([options.drivers.source, options.drivers.target], (driverId, callback) => {
+        let driver = drivers.get(driverId);
+        log.debug('%s is verifying options', driver.info.name);
+        driver.driver.verifyOptions(options, callback);
+    }, callback);
 };

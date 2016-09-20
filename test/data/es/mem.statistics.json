@@ -1,0 +1,16 @@
+{
+  "aliases": {},
+  "docs": {
+    "total": 10
+  },
+  "indices": [
+    "index1"
+  ],
+  "status": "green",
+  "version": {
+    "major": 1,
+    "minor": 6,
+    "original": "1.6.0",
+    "patch": 0
+  }
+}
